@@ -89,6 +89,28 @@ const I18N = {
     'Extract this file here': 'Extraer este archivo aquí', 'Extract this file to…': 'Extraer este archivo en…',
     'Extract file': 'Extraer archivo', 'Extract': 'Extraer', 'Extracted "{name}"': 'Se extrajo "{name}"',
 
+    // sharing
+    'Share…': 'Compartir…', 'Share "{name}"': 'Compartir "{name}"', 'shared': 'compartido', 'Shared by link': 'Compartido mediante enlace',
+    'Anyone with a link can download this file. Every link you create is unique, and you can switch it off at any time.':
+      'Cualquiera con un enlace puede descargar este archivo. Cada enlace que crees es único y puedes desactivarlo en cualquier momento.',
+    'This file is not shared yet.': 'Este archivo aún no se ha compartido.',
+    'Share link': 'Enlace para compartir', 'Copy': 'Copiar', 'Link copied': 'Enlace copiado',
+    'Press Ctrl+C to copy the link': 'Pulsa Ctrl+C para copiar el enlace',
+    'Passcode': 'Código de acceso', 'No passcode': 'Sin código de acceso', 'Passcode (optional)': 'Código de acceso (opcional)',
+    'Add passcode': 'Añadir código de acceso', 'Change passcode': 'Cambiar código de acceso',
+    'People opening this link will have to enter the passcode first. Leave it empty to remove the passcode.':
+      'Quien abra este enlace tendrá que introducir primero el código de acceso. Déjalo vacío para quitarlo.',
+    "For security, a saved passcode can't be shown again.": 'Por seguridad, un código de acceso guardado no se puede volver a mostrar.',
+    'Passcode saved': 'Código de acceso guardado', 'Passcode removed': 'Código de acceso eliminado',
+    'Create a new link': 'Crear un enlace nuevo', 'Create link': 'Crear enlace',
+    'Add a passcode if people should have to enter it before they can download. Min. 4 characters.':
+      'Añade un código de acceso si quieres que se pida antes de poder descargar. Mín. 4 caracteres.',
+    'Link created and copied': 'Enlace creado y copiado', 'Link created': 'Enlace creado',
+    'Stop sharing': 'Dejar de compartir',
+    'Anyone with this link will no longer be able to open or download the file.':
+      'Nadie con este enlace podrá volver a abrir ni descargar el archivo.',
+    'Link removed': 'Enlace eliminado',
+
     // admin
     'Manage who can log in and how much each person can store.': 'Gestiona quién puede iniciar sesión y cuánto puede guardar cada persona.',
     'Server disk': 'Disco del servidor', '{size} free': '{size} libres', 'of {size}': 'de {size}',
@@ -152,6 +174,9 @@ const I18N = {
     "You can't disable your own account": 'No puedes deshabilitar tu propia cuenta',
     "You can't change your own admin role": 'No puedes cambiar tu propio rol de administrador',
     "You can't delete your own account": 'No puedes eliminar tu propia cuenta',
+    'Passcode must be at least 4 characters': 'El código de acceso debe tener al menos 4 caracteres',
+    'Passcode is too long (max. 72 bytes)': 'El código de acceso es demasiado largo (máx. 72 bytes)',
+    'Share not found': 'Enlace no encontrado',
     'Unsupported language': 'Idioma no compatible', 'Server error': 'Error del servidor',
   },
 };

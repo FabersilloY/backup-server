@@ -20,6 +20,7 @@ module.exports = {
         // ADMIN_USERNAME: 'krijn',      // only used on first start
         COOKIE_SECURE: 'false',      // set 'true' once you serve it over HTTPS
         TRUST_PROXY: 'false',        // set 'true' when behind nginx/caddy
+        SHARE_BASE_URL: 'https://files.faberquintero.com', // public share links: <this>/s/<token> (this host serves ONLY /s/*)
       },
     },
   ],

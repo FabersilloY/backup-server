@@ -76,46 +76,11 @@ const ICONS = {
   list: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 6h13M8 12h13M8 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01"/></svg>',
   grid: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>',
   sort: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 4v16M3 16l4 4 4-4M17 20V4M13 8l4-4 4 4"/></svg>',
+  lock: '<svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2.5"/><path d="M8 11V7.5a4 4 0 0 1 8 0V11"/></svg>',
 };
 
-// Each file type gets a page icon with a colored extension badge (e.g. PDF, DOCX, XLSX).
-const FILE_TYPES = [
-  { color: '#e5372b', exts: ['pdf'] },
-  { color: '#2b6cdf', exts: ['doc', 'docx', 'odt', 'rtf', 'pages'] },
-  { color: '#1f9d55', exts: ['xls', 'xlsx', 'xlsm', 'xlsb', 'ods', 'numbers'] },
-  { color: '#e8590c', exts: ['ppt', 'pptx', 'odp', 'key'] },
-  { color: '#0d9488', exts: ['csv', 'tsv'] },
-  { color: '#8b5cf6', exts: ['zip', 'rar', '7z', 'tar', 'gz', 'tgz', 'bz2', 'xz', 'zst'] },
-  { color: '#2e90fa', exts: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'avif', 'ico', 'heic', 'tif', 'tiff', 'svg', 'raw', 'psd'] },
-  { color: '#e04f5f', exts: ['mp4', 'webm', 'm4v', 'mov', 'ogv', 'mkv', 'avi', 'wmv', 'flv'] },
-  { color: '#d6457b', exts: ['mp3', 'wav', 'ogg', 'oga', 'm4a', 'flac', 'aac', 'opus', 'wma', 'aiff'] },
-  { color: '#0ea5e9', exts: ['js', 'ts', 'jsx', 'tsx', 'py', 'rb', 'php', 'java', 'c', 'h', 'cpp', 'cs', 'go', 'rs', 'sh', 'bat', 'ps1', 'html', 'htm', 'css', 'swift', 'kt'] },
-  { color: '#d97706', exts: ['json', 'xml', 'yml', 'yaml', 'toml', 'ini', 'conf', 'cfg', 'env', 'properties', 'sql', 'sqlite', 'db'] },
-  { color: '#64748b', exts: ['txt', 'log', 'md', 'srt', 'vtt', 'gitignore'] },
-  { color: '#475569', exts: ['iso', 'dmg', 'img', 'exe', 'msi', 'apk', 'deb', 'rpm', 'pkg', 'bin'] },
-  { color: '#c026d3', exts: ['ttf', 'otf', 'woff', 'woff2'] },
-];
-const FILE_TYPE_COLOR = new Map(FILE_TYPES.flatMap((t) => t.exts.map((e) => [e, t.color])));
-const iconCache = new Map();
-function fileTypeIcon(ext) {
-  if (iconCache.has(ext)) return iconCache.get(ext);
-  const color = FILE_TYPE_COLOR.get(ext) || '#94a3b8';
-  const label = ext.replace(/[^a-z0-9]/gi, '').slice(0, 4).toUpperCase(); // sanitized: it ends up in markup
-  const page = 'M5 1h13.5L26 8.5V35a2.5 2.5 0 0 1-2.5 2.5h-17A2.5 2.5 0 0 1 4 35V3.5A2.5 2.5 0 0 1 5 1z';
-  const fs = label.length <= 2 ? 10.5 : label.length === 3 ? 9 : 7.6;
-  const svg = '<svg viewBox="0 0 30 38">'
-    + `<path class="pg" d="${page}" stroke-width="1.3"/>`
-    + `<path d="${page}" fill="${color}" fill-opacity=".09"/>`
-    + '<path class="fold" d="M18.5 1v5a2.5 2.5 0 0 0 2.5 2.5h5" stroke-width="1.3" stroke-linejoin="round"/>'
-    + (label
-      ? `<rect x="1" y="20" width="26" height="12" rx="2.6" fill="${color}"/>`
-        + `<text x="14" y="${29.1 - (label.length === 4 ? .3 : 0)}" text-anchor="middle" font-family="system-ui,-apple-system,Segoe UI,Roboto,sans-serif" font-weight="800" font-size="${fs}" fill="#fff">${label}</text>`
-      : `<path d="M9 21h12M9 26h12M9 31h7" stroke="${color}" stroke-width="1.8" stroke-linecap="round" fill="none"/>`)
-    + '</svg>';
-  iconCache.set(ext, svg);
-  return svg;
-}
-const iconMarkup = (entry) => (entry.isDir || entry.dir ? ICONS.folder : fileTypeIcon(extOf(entry.name)));
+// File-type page icons (colored extension badge) come from filetypes.js, which the public share page also uses.
+const iconMarkup = (entry) => (entry.isDir || entry.dir ? ICONS.folder : FileTypes.icon(extOf(entry.name)));
 const fileIcon = (entry, extra) => h('span', { class: 'ficon' + (extra ? ' ' + extra : ''), html: iconMarkup(entry) });
 
 // ---------- api ----------
@@ -163,15 +128,16 @@ const langSwitch = () => h('div', { class: 'segs lang', role: 'group', 'aria-lab
   }, code.toUpperCase())));
 
 // ---------- modal / dialogs ----------
-function openModal({ title, body, foot, wide, xl, flush, icon: iconEntry, onClose }) {
+function openModal({ title, body, foot, wide, xl, md, flush, icon: iconEntry, onClose }) {
   const close = () => {
     overlay.remove();
     document.removeEventListener('keydown', onKey);
     onClose && onClose();
   };
-  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  // Escape closes only the topmost dialog (e.g. a confirm opened on top of the share dialog)
+  const onKey = (e) => { if (e.key === 'Escape' && overlay === [...document.querySelectorAll('.overlay')].pop()) close(); };
   const overlay = h('div', { class: 'overlay', onmousedown: (e) => { if (e.target === overlay) close(); } },
-    h('div', { class: 'modal' + (xl ? ' xl' : wide ? ' wide' : '') },
+    h('div', { class: 'modal' + (xl ? ' xl' : wide ? ' wide' : md ? ' md' : '') },
       h('div', { class: 'modal-head' }, iconEntry ? fileIcon(iconEntry) : null, h('h3', { title }, title), h('button', { class: 'btn ghost icon', onclick: close, 'aria-label': t('Close') }, '✕')),
       h('div', { class: 'modal-body' + (flush ? ' flush' : '') }, body),
       foot ? h('div', { class: 'modal-foot' }, foot) : null));
@@ -555,7 +521,8 @@ function drawFiles(main, data) {
           h('td', { class: 'cb' }, checkbox(e, (on) => row.classList.toggle('selected', on))),
           h('td', {}, h('div', { class: 'name' }, fileIcon(e),
             h('a', { onclick: () => openEntry(e, full), title: e.name }, e.name),
-            e.isZip ? h('span', { class: 'tag' }, 'zip') : null)),
+            e.isZip ? h('span', { class: 'tag' }, 'zip') : null,
+            e.shares ? h('span', { class: 'tag on', title: t('Shared by link') }, t('shared')) : null)),
           h('td', { class: 'num' }, e.isDir ? '' : fmtSize(e.size)),
           h('td', { class: 'when hide-sm' }, fmtDate(e.mtime)),
           h('td', { class: 'act' }, actions(e, full, '')));
@@ -581,7 +548,7 @@ function drawFiles(main, data) {
       actions(e, full, 'tact'),
       h('div', { class: 'tinfo' },
         h('div', { class: 'tname' }, e.name),
-        h('div', { class: 'tmeta' }, e.isDir ? t('Folder') : fmtSize(e.size), ' · ', fmtDate(e.mtime))));
+        h('div', { class: 'tmeta' }, e.isDir ? t('Folder') : fmtSize(e.size), ' · ', fmtDate(e.mtime), e.shares ? [' · ', t('shared')] : null)));
     return tile;
   }));
 
@@ -647,6 +614,7 @@ function entryMenu(anchor, e, full) {
     e.isZip ? { label: t('Extract here'), action: () => extractZip(full) } : null,
     !e.isDir && e.preview ? { label: t('Preview'), action: () => previewFile('/api/download?path=' + enc(full), e.name, full) } : null,
     { label: e.isDir ? t('Download as .zip') : t('Download'), action: () => download(dl) },
+    e.isDir ? null : { label: t('Share…'), action: () => shareDialog(full, e.name) },
     '-',
     { label: t('Rename'), action: () => renameItem(full, e.name) },
     { label: t('Move to…'), action: () => moveItems([full]) },
@@ -660,6 +628,113 @@ function download(url) {
   document.body.append(a);
   a.click();
   a.remove();
+}
+
+// ---------- sharing ----------
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {}
+  // fallback for pages served over plain http, where the clipboard API is unavailable
+  const ta = h('textarea', { style: 'position:fixed;top:0;left:0;opacity:0' });
+  ta.value = text;
+  document.body.append(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch {}
+  ta.remove();
+  return ok;
+}
+
+/** Manage the public links of one file: list them, create a new one (optionally with a passcode), change passcodes, stop sharing. */
+async function shareDialog(full, name) {
+  let shares;
+  try { ({ shares } = await api('/api/shares?path=' + enc(full))); } catch (e) { return fail(e); }
+  let changed = false;
+
+  const list = h('div', { class: 'share-list' });
+
+  const rowOf = (s) => {
+    const url = h('input', { type: 'text', readonly: true, value: s.url, 'aria-label': t('Share link'), onfocus: (ev) => ev.target.select() });
+    return h('div', { class: 'share-row' },
+      h('div', { class: 'share-url' }, url,
+        h('button', {
+          class: 'btn small', type: 'button',
+          onclick: async () => {
+            url.select();
+            toast((await copyText(s.url)) ? t('Link copied') : t('Press Ctrl+C to copy the link'));
+          },
+        }, t('Copy'))),
+      h('div', { class: 'share-meta' },
+        s.hasPasscode
+          ? h('span', { class: 'tag on' }, h('span', { class: 'ico', html: ICONS.lock }), t('Passcode'))
+          : h('span', { class: 'tag' }, t('No passcode')),
+        h('span', { class: 'muted small' }, fmtDate(s.createdAt)),
+        h('div', { class: 'spacer' }),
+        h('button', { class: 'btn small ghost', type: 'button', onclick: () => editPasscode(s) }, s.hasPasscode ? t('Change passcode') : t('Add passcode')),
+        h('button', { class: 'btn small ghost danger', type: 'button', onclick: () => stopSharing(s) }, t('Stop sharing'))));
+  };
+  function draw() {
+    list.replaceChildren(...(shares.length ? shares.map(rowOf) : [h('div', { class: 'muted small' }, t('This file is not shared yet.'))]));
+  }
+
+  async function editPasscode(s) {
+    const v = await dialog({
+      title: s.hasPasscode ? t('Change passcode') : t('Add passcode'),
+      message: t('People opening this link will have to enter the passcode first. Leave it empty to remove the passcode.'),
+      fields: [{ name: 'passcode', label: t('Passcode'), required: false, hint: t("For security, a saved passcode can't be shown again.") }],
+      okText: t('Save'),
+    });
+    if (!v) return;
+    try {
+      const r = await api('/api/shares/' + s.id, { method: 'PATCH', json: { passcode: v.passcode.trim() } });
+      Object.assign(s, r.share);
+      changed = true;
+      draw();
+      toast(r.share.hasPasscode ? t('Passcode saved') : t('Passcode removed'));
+    } catch (ex) { fail(ex); }
+  }
+
+  async function stopSharing(s) {
+    if (!(await confirmDialog(t('Stop sharing'), t('Anyone with this link will no longer be able to open or download the file.'), t('Stop sharing')))) return;
+    try {
+      await api('/api/shares/' + s.id, { method: 'DELETE' });
+      shares.splice(shares.indexOf(s), 1);
+      changed = true;
+      draw();
+      toast(t('Link removed'));
+    } catch (ex) { fail(ex); }
+  }
+
+  const pass = h('input', { type: 'text', autocomplete: 'off', maxlength: '72', placeholder: t('Passcode (optional)'), 'aria-label': t('Passcode (optional)') });
+  const form = h('form', {
+    class: 'share-new',
+    onsubmit: async (e) => {
+      e.preventDefault();
+      try {
+        const r = await api('/api/shares', { json: { path: full, passcode: pass.value.trim() } });
+        shares.push(r.share);
+        pass.value = '';
+        changed = true;
+        draw();
+        toast((await copyText(r.share.url)) ? t('Link created and copied') : t('Link created'));
+      } catch (ex) { fail(ex); }
+    },
+  },
+  h('label', {}, t('Create a new link')),
+  h('div', { class: 'share-new-row' }, pass, h('button', { class: 'btn primary', type: 'submit' }, t('Create link'))),
+  h('div', { class: 'muted small', style: 'margin-top:6px' }, t('Add a passcode if people should have to enter it before they can download. Min. 4 characters.')));
+
+  draw();
+  const m = openModal({
+    title: t('Share "{name}"', { name }), md: true, icon: { name },
+    body: h('div', {},
+      h('p', { class: 'muted', style: 'margin-top:0' }, t('Anyone with a link can download this file. Every link you create is unique, and you can switch it off at any time.')),
+      list, form),
+    foot: [h('button', { class: 'btn', onclick: () => m.close() }, t('Close'))],
+    onClose: () => { if (changed) refresh(); }, // update the "shared" tags in the list behind
+  });
 }
 
 async function newFolder(path) {

@@ -40,6 +40,14 @@ If a firewall is on: `sudo ufw allow 3005/tcp`.
   very large zips open instantly), preview or download single files from inside,
   **extract a single file** (next to the zip, or into any folder you pick), or
   extract the whole archive into a folder (quota-checked, zip-slip protected).
+- **Sharing**: every file has a **Share…** action that creates a public download
+  link like `https://files.faberquintero.com/s/<random token>`. Each link is unique
+  (256-bit random token), can have an optional **passcode** that visitors must enter
+  first, and can be switched off at any time. A link always opens a landing page
+  with the file's icon, name, size and a Download button. You can create several
+  links per file (e.g. a different passcode per person). Links follow the file when
+  it is renamed or moved, and stop working when it is deleted. See
+  [Public share links](#public-share-links-filesfaberquinterocom).
 - **Languages**: English and Spanish. The language is auto-detected from the
   browser on first visit; switching it (EN/ES in the header, or on the login
   page) is saved per user on the server, so it follows them to other browsers.
@@ -73,6 +81,7 @@ server needs outbound HTTPS access to it during `npm install`.
 | `COOKIE_SECURE` | false | Set `true` when served over HTTPS |
 | `TRUST_PROXY` | false | Set `true` behind nginx/caddy |
 | `SESSION_DAYS` | 14 | How long a login lasts |
+| `SHARE_BASE_URL` | https://files.faberquintero.com | Public address used to build share links; the host part is the "share host" (see below) |
 
 After changing: `pm2 restart backup-server --update-env`
 
@@ -108,6 +117,61 @@ server {
 
 Then set `HOST=127.0.0.1`, `COOKIE_SECURE=true`, `TRUST_PROXY=true` and restart.
 Without `client_max_body_size 0`, nginx will reject anything over 1 MB.
+
+## Public share links (files.faberquintero.com)
+
+Share links live on a second subdomain that points at the **same app**:
+
+1. DNS: add an `A` record for `files.faberquintero.com` pointing at the VPS.
+2. Proxy: add a second site that forwards to the app, **keeping the `Host` header**
+   (the app uses it to recognise the share host). With Caddy:
+
+   ```
+   files.faberquintero.com {
+       reverse_proxy 127.0.0.1:3005
+   }
+   ```
+
+   or nginx (plus a certificate, e.g. `certbot --nginx -d files.faberquintero.com`):
+
+   ```nginx
+   server {
+       server_name files.faberquintero.com;
+       client_max_body_size 16k;        # nothing is uploaded through this host
+       proxy_buffering off;             # stream big downloads straight through
+       proxy_read_timeout 3600s;
+       proxy_send_timeout 3600s;
+       location / {
+           proxy_pass http://127.0.0.1:3005;
+           proxy_set_header Host $host;
+           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+           proxy_set_header X-Forwarded-Proto $scheme;
+       }
+   }
+   ```
+3. Make sure `TRUST_PROXY=true` and `COOKIE_SECURE=true` are set (so passcode lockouts
+   count real visitor IPs and the unlock cookie is HTTPS-only), then
+   `pm2 restart backup-server --update-env`.
+
+On the share host the app serves **only** `/s/*`: the login page, API and app files
+return 404 there, so recipients never see (or can probe) the rest of the app. To use a
+different domain, set `SHARE_BASE_URL`.
+
+How the links behave:
+
+- Open a link: landing page with icon, name, size and a Download button. With a passcode
+  set, visitors see only a passcode prompt (no file name) until it is entered; that
+  unlocks the link in their browser for 12 hours. Changing or removing the passcode
+  locks everyone out again immediately.
+- 10 wrong passcodes from one visitor (or 50 for one link) lock that link's passcode
+  form for 15 minutes.
+- Passcodes are stored only as bcrypt hashes, so they can't be shown again later;
+  set a new one if you forget it. Passcodes are 4-72 characters.
+- Unknown, removed and switched-off links all show the same "not available" page.
+  Downloads are never cached by proxies/CDNs.
+- Links are kept in `data/shares.json` (included in the "back up `data/` and `storage/`"
+  advice below). Disabling a user makes their links unavailable; deleting a user
+  deletes their links.
 
 ## Forgot the admin password?
 

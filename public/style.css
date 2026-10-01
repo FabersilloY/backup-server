@@ -202,6 +202,7 @@ td.act { width: 48px; text-align: right; }
 .tag { font-size: 11px; padding: 1px 7px; border-radius: 99px; background: var(--surface-2); color: var(--muted); border: 1px solid var(--border); flex: none; }
 .tag.on { background: var(--accent-soft); color: var(--accent); border-color: transparent; }
 .tag.off { background: var(--danger-soft); color: var(--danger); border-color: transparent; }
+.tag .ico { display: inline-block; vertical-align: -1px; margin-right: 4px; line-height: 0; }
 
 .empty { padding: 60px 20px; text-align: center; color: var(--muted); }
 .empty .big { font-size: 16px; color: var(--text); font-weight: 600; margin-bottom: 4px; }
@@ -260,6 +261,7 @@ td.act { width: 48px; text-align: right; }
   background: var(--surface); border-radius: 14px; box-shadow: var(--shadow); border: 1px solid var(--border);
   width: 100%; max-width: 440px; max-height: calc(100vh - 32px); display: flex; flex-direction: column; overflow: hidden;
 }
+.modal.md { max-width: 560px; }
 .modal.wide { max-width: 900px; }
 .modal.xl { max-width: 1180px; }
 .modal-head { padding: 14px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 12px; }
@@ -297,6 +299,16 @@ table.sheet tbody tr:hover td { background: var(--accent-soft); }
 .zip-meta b { color: var(--text); font-weight: 600; }
 .zip-crumbs { padding: 10px 20px; border-bottom: 1px solid var(--border); font-size: 14px; display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
 .zip-crumbs a { cursor: pointer; }
+
+/* ---------- share dialog ---------- */
+.share-list { display: grid; gap: 10px; margin: 0 0 18px; }
+.share-row { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; background: var(--surface-2); }
+.share-url { display: flex; gap: 8px; }
+.share-url input { flex: 1; min-width: 0; font-family: var(--mono); font-size: 13px; }
+.share-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.share-new { border-top: 1px solid var(--border); padding-top: 14px; }
+.share-new-row { display: flex; gap: 8px; }
+.share-new-row input { flex: 1; min-width: 0; }
 
 /* ---------- uploads panel ---------- */
 .uploads {

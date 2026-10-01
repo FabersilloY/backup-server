@@ -20,6 +20,7 @@ const yauzl = require('yauzl');
 const archiver = require('archiver');
 const mime = require('mime-types');
 const contentDisposition = require('content-disposition');
+const sharePages = require('./share-pages');
 
 // ---------------------------------------------------------------------------
 // Configuration (override with environment variables, see ecosystem.config.js)
@@ -40,6 +41,20 @@ const OFFICE_MAX_UNZIPPED = { doc: 120 * 1024 * 1024, sheet: 200 * 1024 * 1024 }
 const OFFICE_MAX_ZIP_ENTRIES = 20000;
 const OFFICE_TIMEOUT_MS = 20000;
 const OFFICE_MAX_PARALLEL = 2;
+
+// Public share links look like https://files.faberquintero.com/s/<token>. On that host the app serves
+// ONLY /s/* (no app, no API); everything else on it is a 404.
+const SHARE_BASE_URL = (process.env.SHARE_BASE_URL || 'https://files.faberquintero.com').replace(/\/+$/, '');
+let SHARE_HOST;
+try {
+  SHARE_HOST = new URL(SHARE_BASE_URL).hostname.toLowerCase();
+} catch {
+  throw new Error('SHARE_BASE_URL must be a full URL such as https://files.example.com');
+}
+const SHARE_UNLOCK_MS = 12 * 3600 * 1000;     // how long a correct passcode keeps a link open in that browser
+const SHARE_FAIL_WINDOW_MS = 15 * 60 * 1000;  // wrong-passcode lockout window …
+const SHARE_MAX_FAILS_VISITOR = 10;           // … per visitor (IP) and link
+const SHARE_MAX_FAILS_LINK = 50;              // … and per link overall
 
 fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
 fs.mkdirSync(STORAGE_DIR, { recursive: true, mode: 0o700 });
@@ -293,6 +308,138 @@ function fileHeaders(res, name, inline) {
 }
 
 // ---------------------------------------------------------------------------
+// Share links: public, optionally passcode-protected download links.
+// shares.json holds { id, token, userId, path, createdAt, passcodeHash } per link; `path` is the file's
+// path inside the owner's storage and is kept in sync when the file is renamed, moved or deleted.
+// ---------------------------------------------------------------------------
+const SHARES_FILE = path.join(DATA_DIR, 'shares.json');
+let shareDb = { shares: [] };
+try {
+  shareDb = JSON.parse(fs.readFileSync(SHARES_FILE, 'utf8'));
+} catch (e) {
+  if (e.code !== 'ENOENT') throw e;
+}
+if (!Array.isArray(shareDb.shares)) shareDb.shares = [];
+const sharesByToken = new Map(shareDb.shares.map((s) => [s.token, s]));
+
+function saveShares() {
+  const tmp = SHARES_FILE + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(shareDb, null, 2), { mode: 0o600 });
+  fs.renameSync(tmp, SHARES_FILE);
+}
+
+const SHARE_TOKEN_RE = /^[A-Za-z0-9_-]{43}$/; // 32 random bytes, base64url: unguessable
+const newShareToken = () => crypto.randomBytes(32).toString('base64url');
+const shareUrl = (s) => `${SHARE_BASE_URL}/s/${s.token}`;
+const publicShare = (s) => ({ id: s.id, url: shareUrl(s), hasPasscode: !!s.passcodeHash, createdAt: s.createdAt });
+const sharesOfFile = (userId, rel) => shareDb.shares.filter((s) => s.userId === userId && s.path === rel);
+const isInside = (rel, base) => rel === base || rel.startsWith(base + '/');
+
+function removeShares(pred) {
+  const gone = shareDb.shares.filter(pred);
+  if (!gone.length) return;
+  shareDb.shares = shareDb.shares.filter((s) => !pred(s));
+  for (const s of gone) sharesByToken.delete(s.token);
+  saveShares();
+}
+// a file or folder was deleted: its links (and those of anything inside it) stop working
+const dropSharesUnder = (userId, rel) => removeShares((s) => s.userId === userId && isInside(s.path, rel));
+// a file or folder was renamed/moved: links follow it
+function moveShares(userId, from, to) {
+  let n = 0;
+  for (const s of shareDb.shares) {
+    if (s.userId === userId && isInside(s.path, from)) {
+      s.path = to + s.path.slice(from.length);
+      n++;
+    }
+  }
+  if (n) saveShares();
+}
+
+/** Passcodes are optional: empty means none. Surrounding spaces are ignored so a pasted code still works. */
+function cleanPasscode(v) {
+  v = String(v == null ? '' : v).trim();
+  if (!v) return null;
+  if (v.length < 4) throw httpErr(400, 'Passcode must be at least 4 characters');
+  if (Buffer.byteLength(v) > 72) throw httpErr(400, 'Passcode is too long (max. 72 bytes)'); // bcrypt's limit
+  return v;
+}
+
+function getCookie(req, name) {
+  for (const part of String(req.headers.cookie || '').split(';')) {
+    const i = part.indexOf('=');
+    if (i > 0 && part.slice(0, i).trim() === name) return part.slice(i + 1).trim();
+  }
+  return null;
+}
+
+// A correct passcode sets a signed cookie scoped to that one link. The signature covers the link's token and
+// passcode hash, so changing or removing the passcode (or revoking the link) invalidates existing unlocks.
+const SHARE_COOKIE = 'bks_share';
+const SHARE_KEY = crypto.createHmac('sha256', getSecret()).update('share-unlock-cookie').digest();
+function unlockSig(s, exp) {
+  const fp = crypto.createHash('sha256').update(s.passcodeHash).digest('hex');
+  return crypto.createHmac('sha256', SHARE_KEY).update(`${s.token}|${exp}|${fp}`).digest('base64url');
+}
+const makeUnlock = (s) => {
+  const exp = Date.now() + SHARE_UNLOCK_MS;
+  return `${exp}.${unlockSig(s, exp)}`;
+};
+function isUnlocked(req, s) {
+  if (!s.passcodeHash) return true;
+  const [exp, sig] = String(getCookie(req, SHARE_COOKIE) || '').split('.');
+  if (!/^\d{10,16}$/.test(exp || '') || Number(exp) < Date.now() || !sig) return false;
+  const want = Buffer.from(unlockSig(s, exp));
+  const got = Buffer.from(sig);
+  return want.length === got.length && crypto.timingSafeEqual(want, got);
+}
+
+// Wrong-passcode lockout: per visitor+link and per link overall (in memory; a restart clears it)
+const shareFails = new Map(); // key -> { count, until }
+function failRec(key) {
+  const r = shareFails.get(key);
+  if (r && r.until <= Date.now()) {
+    shareFails.delete(key);
+    return null;
+  }
+  return r || null;
+}
+const isLockedOut = (key, max) => (failRec(key) || { count: 0 }).count >= max;
+function noteFail(key) {
+  let r = failRec(key);
+  if (!r) shareFails.set(key, (r = { count: 0, until: Date.now() + SHARE_FAIL_WINDOW_MS }));
+  r.count++;
+}
+setInterval(() => { for (const k of [...shareFails.keys()]) failRec(k); }, 10 * 60 * 1000).unref();
+
+/** Everything a share link needs to be served, or null when it is unknown, switched off or its file is gone. */
+async function resolveShare(token) {
+  if (!SHARE_TOKEN_RE.test(String(token))) return null;
+  const share = sharesByToken.get(token);
+  if (!share) return null;
+  const owner = findUser(share.userId);
+  if (!owner || owner.disabled) return null;
+  let full;
+  try {
+    full = resolveSafe(owner, share.path);
+  } catch {
+    return null;
+  }
+  const st = await fsp.stat(full).catch(() => null);
+  if (!st || !st.isFile()) return null;
+  return { share, owner, full, st, name: path.basename(full) };
+}
+
+/** Headers for the public share pages: never cached, never framed, never indexed, no scripts at all. */
+function shareHeaders(res) {
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive');
+  res.setHeader('Content-Security-Policy',
+    "default-src 'none'; style-src 'unsafe-inline'; img-src data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
+}
+
+// ---------------------------------------------------------------------------
 // Zip helpers (yauzl reads only the central directory: fast even for huge zips)
 // ---------------------------------------------------------------------------
 function openZip(file) {
@@ -347,6 +494,74 @@ app.use((req, res, next) => {
   res.setHeader('Referrer-Policy', 'no-referrer');
   next();
 });
+
+// ---- Public share links (no login) ------------------------------------------
+// On the share host (files.faberquintero.com) nothing but /s/* is served: no app, no API, no static files.
+app.use((req, res, next) => {
+  if ((req.hostname || '').toLowerCase() === SHARE_HOST && !req.path.startsWith('/s/')) {
+    shareHeaders(res);
+    return res.status(404).type('html').send(sharePages.unavailable(sharePages.pickLang(req)));
+  }
+  next();
+});
+
+const sendUnavailable = (req, res) => {
+  shareHeaders(res);
+  res.status(404).type('html').send(sharePages.unavailable(sharePages.pickLang(req)));
+};
+
+// The landing page. Links always land here first; with a passcode set, visitors see the passcode prompt
+// (which reveals nothing about the file) until they have entered it.
+app.get('/s/:token', wrap(async (req, res) => {
+  const { token } = req.params;
+  const r = await resolveShare(token);
+  if (!r) return sendUnavailable(req, res);
+  shareHeaders(res);
+  const lang = sharePages.pickLang(req);
+  if (!isUnlocked(req, r.share)) return res.type('html').send(sharePages.passcode({ token, lang }));
+  res.type('html').send(sharePages.landing({ token, name: r.name, size: r.st.size, lang }));
+}));
+
+app.post('/s/:token', express.urlencoded({ extended: false, limit: '4kb' }), wrap(async (req, res) => {
+  const { token } = req.params;
+  const r = await resolveShare(token);
+  if (!r) return sendUnavailable(req, res);
+  shareHeaders(res);
+  const lang = sharePages.pickLang(req);
+  if (isUnlocked(req, r.share)) return res.redirect(303, `/s/${token}`);
+
+  const visitorKey = `${req.ip}|${token}`;
+  if (isLockedOut(visitorKey, SHARE_MAX_FAILS_VISITOR) || isLockedOut(token, SHARE_MAX_FAILS_LINK))
+    return res.status(429).type('html').send(sharePages.passcode({ token, lang, error: 'tooMany' }));
+
+  const given = String((req.body || {}).passcode ?? '').trim();
+  const ok = given.length > 0 && given.length <= 128 && (await bcrypt.compare(given, r.share.passcodeHash));
+  if (!ok) {
+    noteFail(visitorKey);
+    noteFail(token);
+    return res.status(403).type('html').send(sharePages.passcode({ token, lang, error: 'wrong' }));
+  }
+  shareFails.delete(visitorKey);
+  res.cookie(SHARE_COOKIE, makeUnlock(r.share), {
+    path: `/s/${token}`, httpOnly: true, sameSite: 'lax', secure: COOKIE_SECURE || req.secure, maxAge: SHARE_UNLOCK_MS,
+  });
+  res.redirect(303, `/s/${token}`);
+}));
+
+app.get('/s/:token/download', wrap(async (req, res) => {
+  const { token } = req.params;
+  const r = await resolveShare(token);
+  if (!r) return sendUnavailable(req, res);
+  if (!isUnlocked(req, r.share)) return res.redirect(303, `/s/${token}`);
+  fileHeaders(res, r.name, false); // attachment + locked-down CSP
+  // never let a proxy/CDN keep a copy: it could later be served to someone without the passcode
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive');
+  res.sendFile(r.full, { dotfiles: 'allow', cacheControl: false, headers: { 'Content-Type': res.getHeader('Content-Type') } });
+}));
+
+// anything else under /s/ (missing or malformed token, extra path segments)
+app.use('/s', sendUnavailable);
 
 app.use(
   cookieSession({
@@ -467,6 +682,9 @@ app.get('/api/files', auth(), wrap(async (req, res) => {
   const st = await fsp.stat(dir).catch(() => null);
   if (!st || !st.isDirectory()) throw httpErr(404, 'Folder not found');
   const names = await fsp.readdir(dir, { withFileTypes: true });
+  const sharedCount = new Map(); // how many share links each file has
+  for (const s of shareDb.shares) if (s.userId === u.id) sharedCount.set(s.path, (sharedCount.get(s.path) || 0) + 1);
+  const dirRel = relOf(u, dir);
   const entries = [];
   for (const d of names) {
     if (!d.isDirectory() && !d.isFile()) continue;
@@ -479,6 +697,7 @@ app.get('/api/files', auth(), wrap(async (req, res) => {
       mtime: s.mtime.toISOString(),
       isZip: !d.isDirectory() && /\.zip$/i.test(d.name),
       preview: d.isDirectory() ? null : previewKind(d.name) || officeKind(d.name),
+      shares: d.isDirectory() ? 0 : sharedCount.get(path.posix.join(dirRel, d.name)) || 0,
     });
   }
   entries.sort((a, b) => (a.isDir !== b.isDir ? (a.isDir ? -1 : 1) : a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })));
@@ -526,6 +745,7 @@ app.post('/api/rename', auth(), wrap(async (req, res) => {
   if (dest === src) return res.json({ ok: true });
   if (await exists(dest) && dest.toLowerCase() !== src.toLowerCase()) throw httpErr(409, 'Something with that name already exists');
   await fsp.rename(src, dest);
+  moveShares(u.id, relOf(u, src), relOf(u, dest));
   res.json({ ok: true });
 }));
 
@@ -540,7 +760,9 @@ app.post('/api/move', auth(), wrap(async (req, res) => {
     if (src === userRoot(u)) continue;
     if (destDir === src || destDir.startsWith(src + path.sep)) throw httpErr(400, 'Cannot move a folder into itself');
     if (path.dirname(src) === destDir) continue;
-    await fsp.rename(src, await uniquePath(destDir, path.basename(src)));
+    const target = await uniquePath(destDir, path.basename(src));
+    await fsp.rename(src, target);
+    moveShares(u.id, relOf(u, src), relOf(u, target));
   }
   res.json({ ok: true });
 }));
@@ -552,6 +774,7 @@ app.post('/api/delete', auth(), wrap(async (req, res) => {
     const full = resolveSafe(u, p);
     if (full === userRoot(u)) continue;
     await fsp.rm(full, { recursive: true, force: true });
+    dropSharesUnder(u.id, relOf(u, full));
   }
   invalidateUsage(u);
   res.json({ ok: true, usage: await getUsage(u) });
@@ -623,6 +846,58 @@ app.get('/api/download', auth(), wrap(async (req, res) => {
   const name = path.basename(full);
   fileHeaders(res, name, req.query.inline === '1');
   res.sendFile(full, { dotfiles: 'allow', headers: { 'Content-Type': res.getHeader('Content-Type') } });
+}));
+
+// ---- Share links (owner side) -----------------------------------------------
+// List the links of one file
+app.get('/api/shares', auth(), wrap(async (req, res) => {
+  const u = req.user;
+  const rel = relOf(u, resolveSafe(u, req.query.path));
+  const shares = sharesOfFile(u.id, rel).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  res.json({ shares: shares.map(publicShare) });
+}));
+
+// Create a new link (always a fresh unguessable token), optionally with a passcode
+app.post('/api/shares', auth(), wrap(async (req, res) => {
+  const u = req.user;
+  const full = resolveSafe(u, (req.body || {}).path);
+  const st = await fsp.stat(full).catch(() => null);
+  if (!st || !st.isFile()) throw httpErr(404, 'File not found');
+  const passcode = cleanPasscode((req.body || {}).passcode);
+  const share = {
+    id: crypto.randomBytes(8).toString('hex'),
+    token: newShareToken(),
+    userId: u.id,
+    path: relOf(u, full),
+    createdAt: new Date().toISOString(),
+    passcodeHash: passcode ? await bcrypt.hash(passcode, 10) : null,
+  };
+  shareDb.shares.push(share);
+  sharesByToken.set(share.token, share);
+  saveShares();
+  res.json({ share: publicShare(share) });
+}));
+
+const ownShare = (req) => {
+  const s = shareDb.shares.find((x) => x.id === req.params.id && x.userId === req.user.id);
+  if (!s) throw httpErr(404, 'Share not found');
+  return s;
+};
+
+// Set, change or remove (empty) the passcode of a link
+app.patch('/api/shares/:id', auth(), wrap(async (req, res) => {
+  const s = ownShare(req);
+  const passcode = cleanPasscode((req.body || {}).passcode);
+  s.passcodeHash = passcode ? await bcrypt.hash(passcode, 10) : null;
+  saveShares();
+  res.json({ share: publicShare(s) });
+}));
+
+// Stop sharing: the link stops working immediately
+app.delete('/api/shares/:id', auth(), wrap(async (req, res) => {
+  const s = ownShare(req);
+  removeShares((x) => x === s);
+  res.json({ ok: true });
 }));
 
 // Office previews: .xlsx/.xls/.ods -> JSON (capped rows/cols), .docx -> sandboxed HTML page.
@@ -942,6 +1217,7 @@ app.delete('/api/admin/users/:id', auth({ admin: true }), wrap(async (req, res) 
   if (u.id === req.user.id) throw httpErr(400, "You can't delete your own account");
   db.users = db.users.filter((x) => x.id !== u.id);
   saveDb();
+  removeShares((s) => s.userId === u.id);
   await fsp.rm(userRoot(u), { recursive: true, force: true });
   usageCache.delete(u.id);
   res.json({ ok: true });
