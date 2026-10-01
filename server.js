@@ -11,6 +11,7 @@ const fs = require('fs');
 const fsp = fs.promises;
 const crypto = require('crypto');
 const { pipeline } = require('stream/promises');
+const { Worker } = require('worker_threads');
 const express = require('express');
 const cookieSession = require('cookie-session');
 const multer = require('multer');
@@ -34,6 +35,11 @@ const TRUST_PROXY = process.env.TRUST_PROXY === 'true';     // set true behind n
 const SESSION_DAYS = Number(process.env.SESSION_DAYS || 14);
 const ZIP_LIST_LIMIT = 50000;
 const ZIP_EXTRACT_MAX_ENTRIES = 100000;
+const OFFICE_MAX_BYTES = { doc: 30 * 1024 * 1024, sheet: 25 * 1024 * 1024 }; // largest file we will try to convert
+const OFFICE_MAX_UNZIPPED = { doc: 120 * 1024 * 1024, sheet: 200 * 1024 * 1024 }; // docx/xlsx are zips: refuse bombs
+const OFFICE_MAX_ZIP_ENTRIES = 20000;
+const OFFICE_TIMEOUT_MS = 20000;
+const OFFICE_MAX_PARALLEL = 2;
 
 fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
 fs.mkdirSync(STORAGE_DIR, { recursive: true, mode: 0o700 });
@@ -57,6 +63,7 @@ function saveDb() {
   fs.renameSync(tmp, USERS_FILE);
 }
 
+const LANGS = ['en', 'es'];
 const findUser = (id) => db.users.find((u) => u.id === id);
 const findByName = (name) =>
   db.users.find((u) => u.username.toLowerCase() === String(name || '').toLowerCase());
@@ -70,6 +77,7 @@ function publicUser(u) {
     quotaBytes: u.quotaBytes || 0,
     disabled: !!u.disabled,
     mustChangePassword: !!u.mustChangePassword,
+    lang: LANGS.includes(u.lang) ? u.lang : null, // null = not chosen yet; the browser decides
     createdAt: u.createdAt,
   };
 }
@@ -220,6 +228,51 @@ function previewKind(name) {
   const ext = path.extname(name).slice(1).toLowerCase();
   for (const [kind, set] of Object.entries(PREVIEW)) if (set.has(ext)) return kind;
   return null;
+}
+
+// Office documents are never sent inline; they are converted by preview-worker.js instead
+const OFFICE = {
+  doc: new Set(['docx']),
+  sheet: new Set(['xlsx', 'xlsm', 'xlsb', 'xls', 'ods']),
+};
+function officeKind(name) {
+  const ext = path.extname(name).slice(1).toLowerCase();
+  for (const [kind, set] of Object.entries(OFFICE)) if (set.has(ext)) return kind;
+  return null;
+}
+
+let officeRunning = 0;
+const officeWaiting = [];
+async function runPreviewJob(job) {
+  if (officeRunning >= OFFICE_MAX_PARALLEL) await new Promise((r) => officeWaiting.push(r));
+  officeRunning++;
+  try {
+    return await new Promise((resolve, reject) => {
+      const worker = new Worker(path.join(__dirname, 'preview-worker.js'), {
+        workerData: job,
+        resourceLimits: { maxOldGenerationSizeMb: 192, maxYoungGenerationSizeMb: 32 },
+      });
+      const timer = setTimeout(() => {
+        worker.terminate();
+        reject(httpErr(422, 'This file took too long to convert for a preview. Download it instead.'));
+      }, OFFICE_TIMEOUT_MS);
+      worker.once('message', (m) => {
+        clearTimeout(timer);
+        worker.terminate();
+        m.error ? reject(httpErr(422, m.error)) : resolve(m.result);
+      });
+      worker.once('error', (e) => {
+        clearTimeout(timer);
+        reject(httpErr(422, e && e.code === 'ERR_WORKER_OUT_OF_MEMORY'
+          ? 'This file is too large or complex to preview. Download it instead.'
+          : 'Could not preview this file'));
+      });
+    });
+  } finally {
+    officeRunning--;
+    const next = officeWaiting.shift();
+    if (next) next();
+  }
 }
 
 /** Set headers for sending a file either as a download or as a safe inline preview. */
@@ -398,6 +451,15 @@ app.post('/api/me/password', auth({ allowMustChange: true }), wrap(async (req, r
   res.json({ ok: true });
 }));
 
+// Interface language is stored per user (users.json) so it follows them across browsers
+app.post('/api/me/lang', auth({ allowMustChange: true }), wrap(async (req, res) => {
+  const lang = String((req.body || {}).lang || '');
+  if (!LANGS.includes(lang)) throw httpErr(400, 'Unsupported language');
+  req.user.lang = lang;
+  saveDb();
+  res.json({ ok: true, lang });
+}));
+
 // ---- Files ----------------------------------------------------------------
 app.get('/api/files', auth(), wrap(async (req, res) => {
   const u = req.user;
@@ -416,7 +478,7 @@ app.get('/api/files', auth(), wrap(async (req, res) => {
       size: d.isDirectory() ? null : s.size,
       mtime: s.mtime.toISOString(),
       isZip: !d.isDirectory() && /\.zip$/i.test(d.name),
-      preview: d.isDirectory() ? null : previewKind(d.name),
+      preview: d.isDirectory() ? null : previewKind(d.name) || officeKind(d.name),
     });
   }
   entries.sort((a, b) => (a.isDir !== b.isDir ? (a.isDir ? -1 : 1) : a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' })));
@@ -563,6 +625,90 @@ app.get('/api/download', auth(), wrap(async (req, res) => {
   res.sendFile(full, { dotfiles: 'allow', headers: { 'Content-Type': res.getHeader('Content-Type') } });
 }));
 
+// Office previews: .xlsx/.xls/.ods -> JSON (capped rows/cols), .docx -> sandboxed HTML page.
+//
+// Zip bomb guard: reads only the central directory (cheap) and refuses files that would expand into
+// huge buffers. Legacy .xls (not a zip) is skipped; the worker's heap/time limits still apply to it.
+async function assertSafeToConvert(file, kind) {
+  const fh = await fsp.open(file, 'r');
+  const magic = Buffer.alloc(4);
+  try { await fh.read(magic, 0, 4, 0); } finally { await fh.close(); }
+  if (magic.toString('latin1') !== 'PK\x03\x04') return;
+  const limit = OFFICE_MAX_UNZIPPED[kind];
+  const tooBig = httpErr(413, 'This file expands to too much data to preview safely. Download it instead.');
+  const zip = await openZip(file);
+  try {
+    if (zip.entryCount > OFFICE_MAX_ZIP_ENTRIES) throw tooBig;
+    let total = 0;
+    await eachZipEntry(zip, (e) => {
+      total += e.uncompressedSize;
+      return total > limit; // stop early
+    });
+    if (total > limit) throw tooBig;
+  } finally {
+    zip.close();
+  }
+}
+
+async function officeFileFor(req, kind) {
+  const full = resolveSafe(req.user, req.query.path);
+  const st = await fsp.stat(full).catch(() => null);
+  if (!st || !st.isFile()) throw httpErr(404, 'File not found');
+  if (officeKind(full) !== kind) throw httpErr(400, 'This file type cannot be previewed');
+  if (st.size > OFFICE_MAX_BYTES[kind])
+    throw httpErr(413, `This file is too big to preview (over ${Math.round(OFFICE_MAX_BYTES[kind] / 1048576)} MB). Download it instead.`);
+  await assertSafeToConvert(full, kind);
+  return { file: full, st };
+}
+
+// Small LRU of converted documents so "check" + iframe load (and re-opens) convert only once.
+// Keyed by path + mtime + size, so an edited/replaced file is never served stale.
+const previewCache = new Map();
+async function convertCached(kind, file, st) {
+  const key = `${kind}|${file}|${st.mtimeMs}|${st.size}`;
+  if (previewCache.has(key)) {
+    const v = previewCache.get(key);
+    previewCache.delete(key);
+    previewCache.set(key, v);
+    return v;
+  }
+  const result = await runPreviewJob({ kind, file });
+  if (JSON.stringify(result).length < 4 * 1024 * 1024) {
+    previewCache.set(key, result);
+    while (previewCache.size > 6) previewCache.delete(previewCache.keys().next().value);
+  }
+  return result;
+}
+
+app.get('/api/preview/sheet', auth(), wrap(async (req, res) => {
+  const { file, st } = await officeFileFor(req, 'sheet');
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.json(await convertCached('sheet', file, st));
+}));
+
+app.get('/api/preview/doc', auth(), wrap(async (req, res) => {
+  const { file, st } = await officeFileFor(req, 'doc');
+  const { html } = await convertCached('doc', file, st);
+  // ?check=1 lets the UI surface a readable error before it loads the page into an iframe
+  if (req.query.check === '1') return res.json({ ok: true });
+  // Served into a sandboxed iframe; the CSP below also forbids scripts, network and forms.
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.setHeader('Cache-Control', 'private, no-store');
+  res.setHeader('Content-Security-Policy',
+    "sandbox allow-popups allow-popups-to-escape-sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'");
+  res.send(`<!doctype html><html><head><meta charset="utf-8"><base target="_blank"><meta name="referrer" content="no-referrer"><style>
+    html{background:#eef0ee}
+    body{box-sizing:border-box;max-width:820px;margin:24px auto;padding:56px 64px;background:#fff;color:#1c2321;
+      font:15px/1.65 Georgia,'Times New Roman',serif;box-shadow:0 1px 3px rgba(0,0,0,.12),0 8px 30px rgba(0,0,0,.08);border-radius:4px;overflow-wrap:anywhere}
+    h1,h2,h3,h4,h5,h6{font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;line-height:1.25;margin:1.4em 0 .5em}
+    h1{font-size:1.9em}h2{font-size:1.5em}h3{font-size:1.25em}
+    p{margin:0 0 .9em}a{color:#0f766e}img{max-width:100%;height:auto}
+    table{border-collapse:collapse;margin:1em 0;max-width:100%}td,th{border:1px solid #cfd4d1;padding:5px 9px;vertical-align:top}
+    ul,ol{padding-left:1.6em}
+    @media (max-width:700px){body{margin:0;padding:24px 18px;border-radius:0}}
+  </style></head><body>${html || `<p><em>${req.query.lang === 'es' ? 'Este documento no tiene texto legible.' : 'This document has no readable text.'}</em></p>`}</body></html>`);
+}));
+
 // Download a folder (or the whole storage) as a zip, streamed on the fly
 app.get('/api/download-folder', auth(), wrap(async (req, res) => {
   const u = req.user;
@@ -646,6 +792,40 @@ app.get('/api/zip/entry', auth(), wrap(async (req, res) => {
   } finally {
     zip.close();
   }
+}));
+
+// Extract ONE file out of a zip into a folder of the user's storage (default: next to the zip)
+app.post('/api/zip/extract-entry', auth(), wrap(async (req, res) => {
+  const u = req.user;
+  const zipPath = await zipFileFor(req);
+  const wanted = String((req.body || {}).entry || '');
+  const destDir = (req.body || {}).dest == null ? path.dirname(zipPath) : resolveSafe(u, req.body.dest);
+  const dst = await fsp.stat(destDir).catch(() => null);
+  if (!dst || !dst.isDirectory()) throw httpErr(404, 'Destination folder not found');
+
+  const zip = await openZip(zipPath);
+  let target = null;
+  try {
+    const entry = await eachZipEntry(zip, (e) => e.fileName === wanted);
+    if (!entry || entry.fileName.endsWith('/')) throw httpErr(404, 'Entry not found in zip');
+    if (isEncrypted(entry)) throw httpErr(400, 'This file is password-protected inside the zip and cannot be opened here');
+    if (entry.uncompressedSize > (await remainingBytes(u)))
+      throw httpErr(413, 'Not enough storage space left to extract this file');
+
+    // only the file name is used (never the zip's internal path), so nothing can escape destDir
+    target = await uniquePath(destDir, sanitizeUploadName(path.posix.basename(entry.fileName)));
+    const stream = await openEntryStream(zip, entry);
+    await pipeline(stream, fs.createWriteStream(target, { flags: 'wx' }));
+    const d = entry.getLastModDate();
+    await fsp.utimes(target, d, d).catch(() => {});
+  } catch (e) {
+    if (target) await fsp.rm(target, { force: true }); // don't leave a partial file behind
+    throw e;
+  } finally {
+    zip.close();
+    invalidateUsage(u);
+  }
+  res.json({ ok: true, name: path.basename(target), path: relOf(u, target), usage: await getUsage(u) });
 }));
 
 // Extract a zip into a new folder next to it

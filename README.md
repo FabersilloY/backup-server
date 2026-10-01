@@ -26,13 +26,39 @@ If a firewall is on: `sudo ufw allow 3005/tcp`.
   passwords (optionally forcing a change at next login), disable/enable, grant admin,
   delete user + files. Shows disk free space and total quota allocated.
 - **Files**: folders, multi-file upload with progress, drag & drop, download,
-  download any folder as .zip, rename, move, delete, bulk select.
-  Preview images, video, audio, PDFs and text files in the browser.
+  download any folder as .zip, rename, move, delete, bulk select. List or grid
+  view (with image thumbnails), sortable columns, per-folder filter, and
+  file-type icons. The view and sort choice are remembered in the browser.
+- **Previews**: images, video, audio, PDFs (in-page viewer) and text files, plus
+  **Word (.docx)** and **Excel / OpenDocument (.xlsx .xlsm .xlsb .xls .ods)**.
+  Office files are converted on the server in a memory- and time-limited worker
+  thread and shown read-only: Word as sanitized HTML in a script-less sandboxed
+  frame, spreadsheets as a table (first 1,000 rows / 60 columns of each visible
+  sheet). Files over 30 MB (docx) / 25 MB (xlsx) or that expand to too much data
+  are refused with a prompt to download instead.
 - **Zips**: browse inside a zip like folders (reads only the zip index, so even
   very large zips open instantly), preview or download single files from inside,
-  extract into a folder (quota-checked, zip-slip protected).
+  **extract a single file** (next to the zip, or into any folder you pick), or
+  extract the whole archive into a folder (quota-checked, zip-slip protected).
+- **Languages**: English and Spanish. The language is auto-detected from the
+  browser on first visit; switching it (EN/ES in the header, or on the login
+  page) is saved per user on the server, so it follows them to other browsers.
+  To add a language: add its strings to `public/i18n.js` and its code to
+  `LANGS` in `server.js`.
 - **Limits**: 10 GB per file by default (`MAX_FILE_SIZE_MB`); uploads that would
   exceed the user's limit are rejected.
+
+## Updating
+
+```bash
+git pull
+npm install --omit=dev      # picks up new dependencies (mammoth, xlsx)
+pm2 restart backup-server --update-env
+```
+
+`xlsx` (SheetJS) is installed from `cdn.sheetjs.com`, which is where its
+maintained releases are published (the npm registry copy is outdated), so the
+server needs outbound HTTPS access to it during `npm install`.
 
 ## Configuration (ecosystem.config.js → env)
 
