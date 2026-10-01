@@ -1,0 +1,25 @@
+{
+  "name": "backup-server",
+  "version": "1.0.0",
+  "description": "Simple private file/backup storage server with user quotas and zip viewing",
+  "main": "server.js",
+  "private": true,
+  "scripts": {
+    "start": "node server.js",
+    "reset-password": "node scripts/reset-password.js"
+  },
+  "engines": {
+    "node": ">=18.15"
+  },
+  "license": "UNLICENSED",
+  "dependencies": {
+    "archiver": "^7.0.1",
+    "bcryptjs": "^3.0.3",
+    "content-disposition": "^0.5.4",
+    "cookie-session": "^2.1.1",
+    "express": "^4.22.3",
+    "mime-types": "^3.0.2",
+    "multer": "^2.4.0",
+    "yauzl": "^3.4.0"
+  }
+}
